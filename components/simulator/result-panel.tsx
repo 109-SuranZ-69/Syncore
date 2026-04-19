@@ -130,6 +130,10 @@ export function ResultPanel({
   const endpointStateRef = useRef(currentEndpointState)
   endpointStateRef.current = currentEndpointState
   
+  // 使用 ref 来存储当前配置，避免 config 对象引用变化导致的重新创建
+  const configRef = useRef(config)
+  configRef.current = config
+  
   // 使用 ref 来防止重复执行
   const lastSpeakingRef = useRef(false)
   
@@ -144,20 +148,21 @@ export function ResultPanel({
   }, [endpointStatePreset])
   
   // 执行仲裁（当用户点击说话按钮时调用）
-  // 使用 ref 来获取最新的 endpointState，避免闭包问题和无限循环
+  // 使用 ref 来获取最新的 config 和 endpointState，避免闭包问题和无限循环
   const executeArbitration = useCallback(() => {
     if (!command || !activeZoneId) return
     
-    // 使用 ref 获取最新的端状态
+    // 使用 ref 获取最新的状态
     const stateSnapshot = endpointStateRef.current
+    const configSnapshot = configRef.current
     
     // 调用单屏单信源仲裁引擎
-    const result = arbitrateSingleScreenSingleSource(config, command, stateSnapshot)
+    const result = arbitrateSingleScreenSingleSource(configSnapshot, command, stateSnapshot)
     setArbitrationResult(result)
     
     // 注意：不再自动更新端状态，避免循环
     // 用户可以手动切换预设来模拟不同状态
-  }, [command, activeZoneId, config])
+  }, [command, activeZoneId])
   
   // 当 speaking 状态从 false 变为 true 时执行仲裁
   useEffect(() => {
@@ -488,7 +493,8 @@ export function ResultPanel({
                   {/* 详细决策步骤 */}
                   <div className="flex flex-col gap-2">
                     <Label className="text-[10px] text-muted-foreground">决策步骤详情</Label>
-                    {arbitrationResult.steps.map((step, index) => (
+                    {arbitrationResult?.steps && arbitrationResult.steps.length > 0 ? (
+                      arbitrationResult.steps.map((step, index) => (
                       <Card 
                         key={index} 
                         className={cn(
@@ -548,7 +554,12 @@ export function ResultPanel({
                           </div>
                         </div>
                       </Card>
-                    ))}
+                    ))
+                    ) : (
+                      <div className="p-3 rounded-lg bg-muted/20 border border-dashed border-border/40 text-center">
+                        <p className="text-xs text-muted-foreground">暂无决策步骤</p>
+                      </div>
+                    )}
                   </div>
                   
                   {/* 最终执行信息 */}
