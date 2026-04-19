@@ -1,15 +1,25 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Label } from "@/components/ui/label"
-import { Mic, Sparkles, ArrowRight, ChevronDown } from "lucide-react"
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion"
+import { Mic, Sparkles, ArrowRight, ChevronDown, CheckCircle2, XCircle, AlertCircle, Volume2, Play, Pause, Music } from "lucide-react"
 import { type SimulatorConfig, getZoneOptions } from "./types"
 import { cn } from "@/lib/utils"
+import {
+  type SingleSourceArbitrationResult,
+  type SingleSourceEndpointState,
+  type ArbitrationStep,
+  type EndpointStatus,
+  arbitrateSingleScreenSingleSource,
+  createDefaultEndpointState,
+  createPlayingEndpointState
+} from "@/lib/singleScreenSingleSourceArbitrator"
 
 interface ResultPanelProps {
   config: SimulatorConfig
@@ -21,13 +31,80 @@ interface ResultPanelProps {
   onTriggerSpeak: () => void
 }
 
+/**
+ * 示例语音指令
+ * 【文档对应】根据《3.0平台-语音音乐语义清单-V3.6.xlsx》中的说法模板
+ */
 const EXAMPLE_COMMANDS = [
+  // 打开/关闭类
   "打开音乐",
+  "关闭音乐",
+  "返回播放界面",
+  // 播放控制类
+  "播放音乐",
   "播放陈奕迅的歌",
-  "打开音乐播放列表",
-  "打开歌词",
-  "快进",
-  "音量调大一点",
+  "暂停",
+  "继续播放",
+  "下一首",
+  "上一首",
+  // 播放列表类
+  "打开播放列表",
+  "关闭播放列表",
+  // 收藏类
+  "收藏",
+  "取消收藏",
+  // 模式类
+  "单曲循环",
+  "随机播放",
+  // 查询类
+  "这是什么歌",
+]
+
+/**
+ * 端状态预设选项
+ * 【用于模拟不同的初始状态场景】
+ */
+const STATE_PRESETS: { id: string; label: string; description: string; state: SingleSourceEndpointState }[] = [
+  {
+    id: "closed",
+    label: "应用已关闭",
+    description: "音乐应用未启动",
+    state: createDefaultEndpointState()
+  },
+  {
+    id: "fg_playing",
+    label: "前台播放中",
+    description: "正在前台播放《晴天》",
+    state: createPlayingEndpointState()
+  },
+  {
+    id: "fg_paused",
+    label: "前台已暂停",
+    description: "前台显示但已暂停",
+    state: {
+      ...createPlayingEndpointState(),
+      status: "fg_paused" as EndpointStatus
+    }
+  },
+  {
+    id: "bg_playing",
+    label: "后台播放中",
+    description: "后台播放音乐",
+    state: {
+      ...createPlayingEndpointState(),
+      status: "bg_playing" as EndpointStatus
+    }
+  },
+  {
+    id: "offline",
+    label: "离线状态",
+    description: "网络不可用",
+    state: {
+      ...createDefaultEndpointState(),
+      network: "offline" as const,
+      hasCache: false
+    }
+  }
 ]
 
 export function ResultPanel({
@@ -41,8 +118,55 @@ export function ResultPanel({
 }: ResultPanelProps) {
   const zones = getZoneOptions(config.seatCount, config.audioZone)
   const [stepsOpen, setStepsOpen] = useState(true)
+  
+  // ===== 单屏单信源仲裁相关状态 =====
+  // 【仲裁引擎集成】
+  const [arbitrationResult, setArbitrationResult] = useState<SingleSourceArbitrationResult | null>(null)
+  const [endpointStatePreset, setEndpointStatePreset] = useState<string>("closed")
+  const [currentEndpointState, setCurrentEndpointState] = useState<SingleSourceEndpointState>(createDefaultEndpointState())
+  const [arbitrationOpen, setArbitrationOpen] = useState(true)
+  
+  // 当预设状态改变时，更新当前端状态
+  useEffect(() => {
+    const preset = STATE_PRESETS.find(p => p.id === endpointStatePreset)
+    if (preset) {
+      setCurrentEndpointState(preset.state)
+    }
+  }, [endpointStatePreset])
+  
+  // 执行仲裁（当用户点击说话按钮时调用）
+  const executeArbitration = useCallback(() => {
+    if (!command || !activeZoneId) return
+    
+    // 调用单屏单信源仲裁引擎
+    const result = arbitrateSingleScreenSingleSource(config, command, currentEndpointState)
+    setArbitrationResult(result)
+    
+    // 如果仲裁成功且有状态变更，更新端状态
+    if (result.newStatus && !result.error) {
+      setCurrentEndpointState(prev => ({
+        ...prev,
+        status: result.newStatus,
+        // 如果是打开音乐且原来没有app，设置默认app
+        currentApp: prev.currentApp || (result.actionCode === "OPEN_APP" ? config.mediaSources.main[0] || "netease" : prev.currentApp),
+        // 如果开始播放且没有歌曲，设置默认歌曲
+        currentSongName: prev.currentSongName || (result.newStatus.includes("playing") ? "晴天" : prev.currentSongName),
+        currentArtist: prev.currentArtist || (result.newStatus.includes("playing") ? "周杰伦" : prev.currentArtist)
+      }))
+    }
+  }, [command, activeZoneId, config, currentEndpointState])
+  
+  // 当 speaking 状态变化时执行仲裁
+  useEffect(() => {
+    if (speaking && command) {
+      executeArbitration()
+    } else if (!speaking) {
+      // 可选：speaking 结束时清除结果
+      // setArbitrationResult(null)
+    }
+  }, [speaking, command, executeArbitration])
 
-  // 模拟决策路径（仅占位 UI）
+  // 模拟决策路径（保留原有的简化版本用于基础展示）
   const steps = [
     { label: "语义理解", detail: command ? `解析："${command}"` : "等待指令输入", done: !!command },
     {
@@ -242,6 +366,229 @@ export function ResultPanel({
             </li>
           ))}
         </ol>
+      </div>
+
+      {/* ===== 单屏单信源仲裁决策路径（新增区域） ===== */}
+      {/* 【文档对应】第2节 - 基础场景仲裁可视化 */}
+      <div className="flex flex-col gap-3 pt-2 border-t border-border/40">
+        {/* 标题栏 + 端状态选择 */}
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setArbitrationOpen((v) => !v)}
+            aria-expanded={arbitrationOpen}
+            aria-controls="arbitration-detail"
+            className="flex items-center gap-2 rounded-lg py-1 text-left transition-colors hover:bg-muted/40"
+          >
+            <ChevronDown
+              className={cn(
+                "h-3.5 w-3.5 text-muted-foreground transition-transform duration-200",
+                arbitrationOpen ? "rotate-0" : "-rotate-90",
+              )}
+            />
+            <div className="flex items-center gap-1.5">
+              <Music className="h-3.5 w-3.5 text-emerald-500" />
+              <Label className="text-xs text-muted-foreground cursor-pointer font-medium">
+                单屏单信源仲裁决策
+              </Label>
+            </div>
+          </button>
+          
+          {/* 当前端状态预设选择 */}
+          <div className="flex items-center gap-2">
+            <Label className="text-[10px] text-muted-foreground whitespace-nowrap">模拟端状态:</Label>
+            <Select value={endpointStatePreset} onValueChange={setEndpointStatePreset}>
+              <SelectTrigger className="h-7 w-[120px] rounded-lg text-[11px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {STATE_PRESETS.map((preset) => (
+                  <SelectItem key={preset.id} value={preset.id} className="text-xs">
+                    <div className="flex flex-col">
+                      <span>{preset.label}</span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        
+        {/* 当前端状态显示卡片 */}
+        <div 
+          id="arbitration-detail"
+          className={cn(
+            "flex flex-col gap-3 overflow-hidden transition-all duration-200",
+            arbitrationOpen ? "opacity-100" : "hidden opacity-0"
+          )}
+        >
+          {/* 端状态摘要 */}
+          <div className="flex flex-wrap gap-2 p-3 rounded-xl bg-muted/30 border border-border/40">
+            <Badge variant="outline" className="text-[10px] gap-1">
+              {currentEndpointState.status === "fg_playing" ? (
+                <><Play className="h-2.5 w-2.5 text-emerald-500" /> 前台播放</>
+              ) : currentEndpointState.status === "fg_paused" ? (
+                <><Pause className="h-2.5 w-2.5 text-amber-500" /> 前台暂停</>
+              ) : currentEndpointState.status === "bg_playing" ? (
+                <><Volume2 className="h-2.5 w-2.5 text-sky-500" /> 后台播放</>
+              ) : currentEndpointState.status === "bg_paused" ? (
+                <><Pause className="h-2.5 w-2.5 text-muted-foreground" /> 后台暂停</>
+              ) : (
+                <><XCircle className="h-2.5 w-2.5 text-muted-foreground" /> 已关闭</>
+              )}
+            </Badge>
+            <Badge variant="outline" className="text-[10px]">
+              {currentEndpointState.network === "online" ? "在线" : "离线"}
+            </Badge>
+            <Badge variant="outline" className="text-[10px]">
+              {currentEndpointState.login === "logged_in" ? "已登录" : "未登录"}
+            </Badge>
+            {currentEndpointState.currentSongName && (
+              <Badge variant="outline" className="text-[10px] bg-emerald-50 dark:bg-emerald-950/30">
+                正在播放: {currentEndpointState.currentSongName}
+              </Badge>
+            )}
+          </div>
+          
+          {/* 仲裁结果展示（使用 Accordion） */}
+          {arbitrationResult && (
+            <Accordion type="single" collapsible defaultValue="result" className="w-full">
+              {/* 仲裁结果摘要 */}
+              <AccordionItem value="result" className="border-none">
+                <AccordionTrigger className="py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-50 to-sky-50 dark:from-emerald-950/30 dark:to-sky-950/30 hover:no-underline">
+                  <div className="flex items-center gap-2 text-left">
+                    {arbitrationResult.error ? (
+                      <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+                    )}
+                    <div className="flex flex-col items-start">
+                      <span className="text-xs font-medium">{arbitrationResult.action}</span>
+                      <span className="text-[10px] text-muted-foreground">{arbitrationResult.ttsContent}</span>
+                    </div>
+                  </div>
+                </AccordionTrigger>
+                <AccordionContent className="pt-3 pb-0">
+                  {/* TTS 和提示语ID */}
+                  <div className="mb-3 p-2 rounded-lg bg-sky-50/50 dark:bg-sky-950/20 border border-sky-100 dark:border-sky-900">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Volume2 className="h-3 w-3 text-sky-500" />
+                      <span className="text-[10px] font-medium text-sky-700 dark:text-sky-300">TTS播报</span>
+                      <Badge variant="outline" className="text-[9px] h-4 px-1.5">
+                        {arbitrationResult.ttsPromptId}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-muted-foreground pl-5">
+                      {arbitrationResult.ttsContent}
+                    </p>
+                  </div>
+                  
+                  {/* 详细决策步骤 */}
+                  <div className="flex flex-col gap-2">
+                    <Label className="text-[10px] text-muted-foreground">决策步骤详情</Label>
+                    {arbitrationResult.steps.map((step, index) => (
+                      <Card 
+                        key={index} 
+                        className={cn(
+                          "p-3 border transition-colors",
+                          step.passed 
+                            ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-900 dark:bg-emerald-950/20" 
+                            : "border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20"
+                        )}
+                      >
+                        <div className="flex items-start gap-2">
+                          {/* 步骤编号 */}
+                          <div className={cn(
+                            "flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold shrink-0",
+                            step.passed 
+                              ? "bg-emerald-500 text-white" 
+                              : "bg-amber-500 text-white"
+                          )}>
+                            {step.stepNumber}
+                          </div>
+                          
+                          <div className="flex-1 min-w-0">
+                            {/* 步骤标题 */}
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-xs font-semibold">{step.title}</span>
+                              {step.passed ? (
+                                <CheckCircle2 className="h-3 w-3 text-emerald-500" />
+                              ) : (
+                                <XCircle className="h-3 w-3 text-amber-500" />
+                              )}
+                            </div>
+                            
+                            {/* 步骤描述 */}
+                            <p className="text-[11px] text-muted-foreground mt-0.5">
+                              {step.description}
+                            </p>
+                            
+                            {/* 判断条件和结果 */}
+                            <div className="mt-2 grid grid-cols-1 gap-1 text-[10px]">
+                              <div className="flex gap-1">
+                                <span className="text-muted-foreground shrink-0">判断条件:</span>
+                                <span className="font-mono text-sky-600 dark:text-sky-400">{step.condition}</span>
+                              </div>
+                              <div className="flex gap-1">
+                                <span className="text-muted-foreground shrink-0">判断结果:</span>
+                                <span className={cn(
+                                  "font-medium",
+                                  step.passed ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"
+                                )}>
+                                  {step.result}
+                                </span>
+                              </div>
+                              <div className="flex gap-1">
+                                <span className="text-muted-foreground shrink-0">文档参考:</span>
+                                <span className="text-purple-600 dark:text-purple-400 italic">{step.documentRef}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+                  
+                  {/* 最终执行信息 */}
+                  <div className="mt-3 p-3 rounded-lg bg-gradient-to-r from-sky-100/50 to-emerald-100/50 dark:from-sky-950/30 dark:to-emerald-950/30 border border-sky-200 dark:border-sky-800">
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-muted-foreground">目标屏幕: </span>
+                        <span className="font-medium">{arbitrationResult.targetScreen}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">动作代码: </span>
+                        <code className="px-1 py-0.5 rounded bg-muted text-[10px]">{arbitrationResult.actionCode}</code>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">新状态: </span>
+                        <span className="font-medium">{arbitrationResult.newStatus}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">单屏单信源: </span>
+                        <span className={cn(
+                          "font-medium",
+                          arbitrationResult.isSingleScreenSingleSource ? "text-emerald-600" : "text-amber-600"
+                        )}>
+                          {arbitrationResult.isSingleScreenSingleSource ? "是" : "否"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          )}
+          
+          {/* 未执行时的提示 */}
+          {!arbitrationResult && (
+            <div className="flex items-center justify-center p-6 rounded-xl bg-muted/20 border border-dashed border-border/60">
+              <p className="text-xs text-muted-foreground text-center">
+                输入语音指令并点击说话按钮，查看仲裁决策路径
+              </p>
+            </div>
+          )}
+        </div>
       </div>
 
       <style>{`
