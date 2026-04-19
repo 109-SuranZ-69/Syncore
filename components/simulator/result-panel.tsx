@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -126,44 +126,46 @@ export function ResultPanel({
   const [currentEndpointState, setCurrentEndpointState] = useState<SingleSourceEndpointState>(createDefaultEndpointState())
   const [arbitrationOpen, setArbitrationOpen] = useState(true)
   
+  // 使用 ref 来存储当前端状态，避免 useCallback 的循环依赖
+  const endpointStateRef = useRef(currentEndpointState)
+  endpointStateRef.current = currentEndpointState
+  
+  // 使用 ref 来防止重复执行
+  const lastSpeakingRef = useRef(false)
+  
   // 当预设状态改变时，更新当前端状态
   useEffect(() => {
     const preset = STATE_PRESETS.find(p => p.id === endpointStatePreset)
     if (preset) {
       setCurrentEndpointState(preset.state)
+      // 同时清除之前的仲裁结果
+      setArbitrationResult(null)
     }
   }, [endpointStatePreset])
   
   // 执行仲裁（当用户点击说话按钮时调用）
+  // 使用 ref 来获取最新的 endpointState，避免闭包问题和无限循环
   const executeArbitration = useCallback(() => {
     if (!command || !activeZoneId) return
     
+    // 使用 ref 获取最新的端状态
+    const stateSnapshot = endpointStateRef.current
+    
     // 调用单屏单信源仲裁引擎
-    const result = arbitrateSingleScreenSingleSource(config, command, currentEndpointState)
+    const result = arbitrateSingleScreenSingleSource(config, command, stateSnapshot)
     setArbitrationResult(result)
     
-    // 如果仲裁成功且有状态变更，更新端状态
-    if (result.newStatus && !result.error) {
-      setCurrentEndpointState(prev => ({
-        ...prev,
-        status: result.newStatus,
-        // 如果是打开音乐且原来没有app，设置默认app
-        currentApp: prev.currentApp || (result.actionCode === "OPEN_APP" ? config.mediaSources.main[0] || "netease" : prev.currentApp),
-        // 如果开始播放且没有歌曲，设置默认歌曲
-        currentSongName: prev.currentSongName || (result.newStatus.includes("playing") ? "晴天" : prev.currentSongName),
-        currentArtist: prev.currentArtist || (result.newStatus.includes("playing") ? "周杰伦" : prev.currentArtist)
-      }))
-    }
-  }, [command, activeZoneId, config, currentEndpointState])
+    // 注意：不再自动更新端状态，避免循环
+    // 用户可以手动切换预设来模拟不同状态
+  }, [command, activeZoneId, config])
   
-  // 当 speaking 状态变化时执行仲裁
+  // 当 speaking 状态从 false 变为 true 时执行仲裁
   useEffect(() => {
-    if (speaking && command) {
+    // 只在 speaking 从 false 变为 true 时触发
+    if (speaking && !lastSpeakingRef.current && command) {
       executeArbitration()
-    } else if (!speaking) {
-      // 可选：speaking 结束时清除结果
-      // setArbitrationResult(null)
     }
+    lastSpeakingRef.current = speaking
   }, [speaking, command, executeArbitration])
 
   // 模拟决策路径（保留原有的简化版本用于基础展示）
